@@ -1,88 +1,93 @@
-# braile_translator/app.py
-
-import os
-import numpy as np
-import tensorflow as tf
 import streamlit as st
-
+import tensorflow as tf
+import numpy as np
+import os
 from src.preprocess import get_processed_image, get_character_segments
+from deep_translator import GoogleTranslator
 
+st.set_page_config(page_title="Braille AI", layout="wide")
 
-# ---------- PAGE SETUP ----------
-st.set_page_config(page_title="Braille → English Translator", layout="wide")
-st.title("Braille Image to English Text Translator")
+# UI Styling
+st.markdown("""
+    <style>
+    .stApp { background-color: #F8F9FA; }
+    .logo-text { color: #007BFF; font-weight: bold; font-size: 30px; margin-bottom: 10px; }
+    .result-box { font-size: 40px !important; font-weight: bold; color: #007BFF; background: #FFF; padding: 20px; border: 1px solid #DDD; border-radius: 10px; min-height: 150px; }
+    </style>
+""", unsafe_allow_html=True)
 
-st.sidebar.header("Options")
-fix_inversion = st.sidebar.checkbox(
-    "Use normal threshold (check if output looks wrong)",
-    value=False,
-)
+st.markdown('<div class="logo-text">Braille AI</div>', unsafe_allow_html=True)
 
+# Settings
+target_lang = st.sidebar.selectbox("Target Language", ["English", "Malayalam", "Tamil", "Telugu"])
+lang_codes = {"Malayalam": "ml", "Tamil": "ta", "Telugu": "te", "English": "en"}
 
-# ---------- LOAD MODEL ----------
-def load_model():
-    model_path = "models/braille_model.h5"
-    if os.path.exists(model_path):
-        return tf.keras.models.load_model(model_path)
+# Load AI Model
+@st.cache_resource
+def load_braille_ai():
+    path = "models/braille_model.h5" 
+    if os.path.exists(path):
+        return tf.keras.models.load_model(path)
     return None
 
+model = load_braille_ai()
+class_names = list("abcdefghijklmnopqrstuvwxyz")
 
-model = load_model()
-class_names = list("abcdefghijklmnopqrstuvwxyz")  # must match training labels
+uploaded_file = st.file_uploader("Upload Braille Image", type=['jpg', 'png', 'jpeg'])
 
+if uploaded_file:
+    original, thresh_normal, thresh_inv = get_processed_image(uploaded_file.read())
+    
+    col_left, col_right = st.columns(2)
 
-# ---------- FILE UPLOAD ----------
-uploaded_file = st.file_uploader(
-    "Upload a Braille image", type=["jpg", "jpeg", "png"]
-)
+    with col_left:
+        with st.container(border=True):
+            st.write("### 📷 Frame 1: Braille Script")
+            st.image(original, use_container_width=True)
 
-if uploaded_file is None:
-    st.info("Please upload a Braille image to start.")
-elif model is None:
-    st.error("Model file not found at 'models/braille_model.h5'. Train or copy it first.")
+    with col_right:
+        with st.container(border=True):
+            st.write(f"### 📜 Frame 2: Translation ({target_lang})")
+            
+            if model is None:
+                st.error("Model file 'braille_model.h5' not found.")
+            else:
+                try:
+                    # Segment characters
+                    cells_data = get_character_segments(thresh_inv, thresh_normal)
+                    
+                    if len(cells_data) > 0:
+                        # --- ADDED DEBUG PREVIEW ---
+                        st.write("### AI Input Preview (Should be White dots on Black)")
+                        # cells_data is a list of (image, is_space), so we take c[0]
+                        st.image([c[0] for c in cells_data], width=50) 
+                        # ---------------------------
+
+                        eng_text = ""
+                        for cell_img, has_space in cells_data:
+                            # Rescale and Reshape
+                            inp = cell_img.astype(np.float32) / 255.0
+                            inp = inp.reshape(1, 28, 28, 1)
+                            
+                            # Prediction
+                            pred = model.predict(inp, verbose=0)
+                            eng_text += class_names[np.argmax(pred)]
+                            if has_space: eng_text += " "
+                        
+                        final_eng = eng_text.upper()
+                        
+                        # Translate
+                        if target_lang == "English":
+                            final_output = final_eng
+                        else:
+                            final_output = GoogleTranslator(source='en', target=lang_codes[target_lang]).translate(final_eng)
+
+                        st.markdown(f'<div class="result-box">{final_output}</div>', unsafe_allow_html=True)
+                        if target_lang != "English":
+                            st.caption(f"English: {final_eng}")
+                    else:
+                        st.warning("No Braille cells detected.")
+                except Exception as e:
+                    st.error(f"Prediction Error: {e}")
 else:
-    # ---------- IMAGE PREPROCESSING ----------
-    # 1. Get original and binary versions
-    original, thresh_normal, thresh_inv = get_processed_image(
-        uploaded_file.read()
-    )
-
-    # 2. Choose which binary image to send to the model
-    #    If output looks inverted/wrong, toggle the sidebar checkbox.
-    ai_input_binary = thresh_normal if fix_inversion else thresh_inv
-
-    # 3. Segment into individual Braille character cells
-    cells = get_character_segments(ai_input_binary)
-
-    # ---------- DISPLAY IMAGES ----------
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(original, caption="Original Image", use_container_width=True)
-    with col2:
-        st.image(
-            ai_input_binary,
-            caption="Binary Image Used for Prediction",
-            use_container_width=True,
-        )
-
-    if len(cells) == 0:
-        st.warning("No Braille dots detected. Try a clearer image.")
-    else:
-        st.write("---")
-        st.subheader("Detected Character Cells")
-        st.image(cells, width=60)
-
-        # ---------- PREDICTION LOOP ----------
-        english_text = ""
-        for cell in cells:
-            # normalize to 0–1 and reshape to (1, 28, 28, 1)
-            inp = cell.astype("float32") / 255.0
-            inp = inp.reshape(1, 28, 28, 1)
-            prediction = model.predict(inp, verbose=0)
-            english_text += class_names[np.argmax(prediction)]
-
-        english_text = english_text.upper()
-
-        # ---------- OUTPUT ----------
-        st.subheader("Translated English Text")
-        st.success(english_text)
+    st.info("Please upload an image to view results.")
